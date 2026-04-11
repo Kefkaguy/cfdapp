@@ -1,0 +1,59 @@
+{
+  "computeTargets": [
+    {
+      "id": "local",
+      "label": "Local",
+      "enabled": true,
+      "description": "Runs the simulation on this machine through the local worker."
+    },
+    {
+      "id": "cloud",
+      "label": "Cloud",
+      "enabled": false,
+      "description": "Reserved for remote worker execution in a later phase."
+    }
+  ],
+  "qualityPresets": [
+    {
+      "id": "preview",
+      "label": "Preview",
+      "enabled": true,
+      "description": "Fast external aero preview with a coarse mesh and short solve."
+    },
+    {
+      "id": "standard",
+      "label": "Standard",
+      "enabled": false,
+      "description": "Reserved for a refined mesh and longer solve."
+    },
+    {
+      "id": "high",
+      "label": "High",
+      "enabled": false,
+      "description": "Reserved for the highest local/cloud accuracy path."
+    }
+  ],
+  "resourceCaps": [
+    {
+      "id": "low-impact",
+      "label": "Low Impact",
+      "cores": 2,
+      "nice": 10,
+      "description": "Prioritizes keeping the machine responsive."
+    },
+    {
+      "id": "balanced",
+      "label": "Balanced",
+      "cores": 4,
+      "nice": 5,
+      "description": "Uses a moderate share of the machine."
+    },
+    {
+      "id": "max-speed",
+      "label": "Max Speed",
+      "cores": 8,
+      "nice": 0,
+      "description": "Uses the largest local allocation available to the worker."
+    }
+  ]
+}

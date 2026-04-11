@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cfdapp.local/schemas/job-schema.json",
+  "title": "CFD Job",
+  "type": "object",
+  "required": [
+    "id",
+    "status",
+    "stage",
+    "computeTarget",
+    "qualityPreset",
+    "resourceCap",
+    "createdAt",
+    "updatedAt"
+  ],
+  "properties": {
+    "id": { "type": "string" },
+    "status": {
+      "type": "string",
+      "enum": ["queued", "running", "succeeded", "failed"]
+    },
+    "stage": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "validating",
+        "building-case",
+        "meshing",
+        "solving",
+        "extracting",
+        "packaging",
+        "completed",
+        "failed"
+      ]
+    },
+    "computeTarget": {
+      "type": "string",
+      "enum": ["local", "cloud"]
+    },
+    "qualityPreset": {
+      "type": "string",
+      "enum": ["preview", "standard", "high"]
+    },
+    "resourceCap": {
+      "type": "string",
+      "enum": ["low-impact", "balanced", "max-speed"]
+    },
+    "error": { "type": ["string", "null"] },
+    "stageMessage": { "type": ["string", "null"] },
+    "summary": {
+      "type": ["object", "null"],
+      "additionalProperties": true
+    }
+  }
+}

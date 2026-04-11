@@ -1,0 +1,13 @@
+{
+  "name": "cfdapp",
+  "private": true,
+  "workspaces": [
+    "frontend"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace frontend",
+    "dev": "npm run dev --workspace frontend",
+    "kefka": "powershell -ExecutionPolicy Bypass -File .\\scripts\\start-kefka.ps1",
+    "test": "npm run test --workspace frontend"
+  }
+}

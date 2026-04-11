@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+*.pyc
+storage/jobs/*
+storage/results/*
+storage/meshes/*
+!storage/jobs/.gitkeep
+!storage/results/.gitkeep
+!storage/meshes/.gitkeep
