@@ -332,11 +332,21 @@ def extract_results(job: JobRecord, repository: JobRepository) -> JobSummary:
     surface = dataset.extract_surface() if hasattr(dataset, "extract_surface") else dataset
     if hasattr(surface, "triangulate"):
         surface = surface.triangulate()
+    if "p" in getattr(surface, "cell_data", {}):
+        surface = surface.cell_data_to_point_data()
     if "p" not in surface.array_names:
         raise PipelineError("Pressure field 'p' was not found in the extracted dataset.")
+    if hasattr(surface, "set_active_scalars"):
+        surface.set_active_scalars("p")
 
     if surface.n_cells > 50000:
-        surface = surface.decimate(0.75)
+        reduced = surface.decimate(0.75)
+        if "p" not in reduced.array_names and hasattr(reduced, "sample"):
+            reduced = reduced.sample(surface)
+        surface = reduced
+
+    if "p" not in surface.array_names:
+        raise PipelineError("Pressure field 'p' was not retained on the extracted surface.")
 
     pressure = np.asarray(surface["p"], dtype=float)
     payload = polydata_to_payload(surface, pressure)

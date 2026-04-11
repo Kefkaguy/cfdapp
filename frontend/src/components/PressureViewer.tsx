@@ -22,28 +22,35 @@ export function PressureViewer({ payload, summary, yawDegrees, onYawChange }: Pr
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color("#02060d");
+    scene.fog = new THREE.Fog("#02060d", 5, 14);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(mount.clientWidth, mount.clientHeight);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
     mount.appendChild(renderer.domElement);
 
     const camera = new THREE.PerspectiveCamera(42, mount.clientWidth / mount.clientHeight, 0.01, 100);
-    camera.position.set(2.8, 1.6, 3.2);
+    camera.position.set(3.2, 1.15, 2.4);
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.minDistance = 1.2;
     controls.maxDistance = 8;
-    controls.maxPolarAngle = Math.PI * 0.58;
+    controls.enablePan = false;
+    controls.minPolarAngle = Math.PI * 0.18;
+    controls.maxPolarAngle = Math.PI * 0.48;
 
-    scene.add(new THREE.AmbientLight("#dff6ff", 0.7));
-    const keyLight = new THREE.DirectionalLight("#8bc5ff", 1.8);
-    keyLight.position.set(3, 4, 2.5);
+    scene.add(new THREE.AmbientLight("#c8f7ff", 0.7));
+    const keyLight = new THREE.DirectionalLight("#8bd8ff", 1.6);
+    keyLight.position.set(4, 4, 2);
     scene.add(keyLight);
-    const rimLight = new THREE.DirectionalLight("#6effc6", 0.95);
-    rimLight.position.set(-3, 2, -4);
+    const rimLight = new THREE.DirectionalLight("#89ffba", 1.05);
+    rimLight.position.set(-3, 1.8, -3.5);
     scene.add(rimLight);
+    const fillLight = new THREE.DirectionalLight("#2dc8ff", 0.45);
+    fillLight.position.set(0, 3, 5);
+    scene.add(fillLight);
 
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.Float32BufferAttribute(orientAndNormalizePositions(payload.positions), 3));
@@ -53,33 +60,50 @@ export function PressureViewer({ payload, summary, yawDegrees, onYawChange }: Pr
 
     const material = new THREE.MeshPhysicalMaterial({
       vertexColors: true,
-      metalness: 0.02,
-      roughness: 0.32,
-      clearcoat: 0.2,
-      clearcoatRoughness: 0.35,
+      metalness: 0.05,
+      roughness: 0.22,
+      clearcoat: 0.45,
+      clearcoatRoughness: 0.18,
+      transmission: 0.08,
+      transparent: true,
+      opacity: 0.96,
       side: THREE.DoubleSide
     });
 
     const mesh = new THREE.Mesh(geometry, material);
+    const wireframe = new THREE.LineSegments(
+      new THREE.EdgesGeometry(geometry, 27),
+      new THREE.LineBasicMaterial({
+        color: "#c6fff0",
+        transparent: true,
+        opacity: 0.18
+      }),
+    );
     const carGroup = new THREE.Group();
     carGroup.add(mesh);
+    carGroup.add(wireframe);
     scene.add(carGroup);
     carGroup.rotation.y = THREE.MathUtils.degToRad(yawDegrees);
 
     const box = new THREE.Box3().setFromObject(mesh);
     const size = box.getSize(new THREE.Vector3());
     const maxDimension = Math.max(size.x, size.y, size.z, 1e-6);
-    controls.target.set(0, 0, 0);
-    camera.position.set(maxDimension * 2.15, maxDimension * 0.58, maxDimension * 1.35);
+    const center = box.getCenter(new THREE.Vector3());
+    const slab = buildPressureSlab(size, center);
+    scene.add(slab);
+    const floor = buildFloorPlane(size, center);
+    scene.add(floor);
+
+    controls.target.set(center.x * 0.05, size.y * 0.18, center.z * 0.04);
+    camera.position.set(maxDimension * 2.6, maxDimension * 0.82, maxDimension * 1.8);
     camera.near = maxDimension / 100;
     camera.far = maxDimension * 20;
     camera.updateProjectionMatrix();
 
-    const { group: freestreamGroup, particles } = buildFreestreamGroup(maxDimension, box);
+    const freestreamGroup = buildFreestreamGroup(size, center);
     scene.add(freestreamGroup);
 
     let animationFrame = 0;
-    const clock = new THREE.Clock();
     const onResize = () => {
       camera.aspect = mount.clientWidth / mount.clientHeight;
       camera.updateProjectionMatrix();
@@ -88,12 +112,7 @@ export function PressureViewer({ payload, summary, yawDegrees, onYawChange }: Pr
     window.addEventListener("resize", onResize);
 
     const render = () => {
-      const elapsed = clock.getElapsedTime();
       carGroup.rotation.y = THREE.MathUtils.degToRad(yawDegrees);
-      for (const particle of particles) {
-        const progress = (particle.offset + elapsed * particle.speed) % 1;
-        particle.mesh.position.copy(particle.curve.getPoint(progress));
-      }
       controls.update();
       renderer.render(scene, camera);
       animationFrame = window.requestAnimationFrame(render);
@@ -112,6 +131,16 @@ export function PressureViewer({ payload, summary, yawDegrees, onYawChange }: Pr
           (child.material as THREE.Material).dispose();
         }
       });
+      slab.traverse((child) => {
+        if (child instanceof THREE.Mesh) {
+          child.geometry.dispose();
+          disposeMaterial(child.material);
+        }
+      });
+      floor.geometry.dispose();
+      disposeMaterial(floor.material);
+      wireframe.geometry.dispose();
+      disposeMaterial(wireframe.material);
       renderer.dispose();
       mount.removeChild(renderer.domElement);
     };
@@ -178,6 +207,16 @@ function buildVertexColors(payload: PressureSurfacePayload): number[] {
   });
 }
 
+function disposeMaterial(material: THREE.Material | THREE.Material[]): void {
+  if (Array.isArray(material)) {
+    for (const entry of material) {
+      entry.dispose();
+    }
+    return;
+  }
+  material.dispose();
+}
+
 function formatNullable(value: number | null): string {
   return value == null ? "n/a" : value.toFixed(4);
 }
@@ -218,84 +257,144 @@ function orientAndNormalizePositions(positions: number[]): number[] {
 
   const center = axisMins.map((minValue, axis) => (minValue + axisMaxs[axis]) / 2);
   const maxAxis = Math.max(axisMaxs[0] - axisMins[0], axisMaxs[1] - axisMins[1], axisMaxs[2] - axisMins[2], 1e-6);
+  const floor = axisMins[1];
 
   for (let index = 0; index < remapped.length; index += 3) {
     remapped[index] = (remapped[index] - center[0]) / maxAxis;
-    remapped[index + 1] = (remapped[index + 1] - center[1]) / maxAxis;
+    remapped[index + 1] = (remapped[index + 1] - floor) / maxAxis;
     remapped[index + 2] = (remapped[index + 2] - center[2]) / maxAxis;
   }
 
   return remapped;
 }
 
-function buildFreestreamGroup(scale: number, box: THREE.Box3): {
-  group: THREE.Group;
-  particles: Array<{
-    curve: THREE.CatmullRomCurve3;
-    mesh: THREE.Mesh;
-    speed: number;
-    offset: number;
-  }>;
-} {
+function buildFreestreamGroup(size: THREE.Vector3, center: THREE.Vector3): THREE.Group {
   const group = new THREE.Group();
-  const particles: Array<{
-    curve: THREE.CatmullRomCurve3;
-    mesh: THREE.Mesh;
-    speed: number;
-    offset: number;
-  }> = [];
-  const lineCount = 18;
-  const extentY = Math.max(box.max.y - box.min.y, 0.8);
-  const extentZ = Math.max(box.max.z - box.min.z, 0.8);
-  const particleGeometry = new THREE.SphereGeometry(scale * 0.008, 8, 8);
+  const lineCount = 22;
+  const lineLength = size.x * 5.9;
+  const spacing = Math.max(size.z * 0.16, 0.1);
+  const startX = center.x - lineLength * 0.56;
+  const endX = center.x + lineLength * 0.44;
+  const y = size.y * 0.22;
 
   for (let index = 0; index < lineCount; index += 1) {
-    const normalized = index / (lineCount - 1);
-    const z = THREE.MathUtils.lerp(-extentZ * 1.15, extentZ * 1.15, normalized);
-    const yWave = Math.sin(normalized * Math.PI * 2) * extentY * 0.06;
-    const yBase = THREE.MathUtils.lerp(extentY * 0.6, -extentY * 0.12, normalized);
-    const curve = new THREE.CatmullRomCurve3([
-      new THREE.Vector3(-2.8 * scale, yBase + yWave, z),
-      new THREE.Vector3(-1.4 * scale, yBase + yWave * 0.7, z),
-      new THREE.Vector3(0.2 * scale, yBase + yWave * 0.35, z),
-      new THREE.Vector3(2.6 * scale, yBase, z),
-    ]);
-    const points = curve.getPoints(80);
+    const z = center.z + (index - (lineCount - 1) / 2) * spacing;
+    const points = [new THREE.Vector3(startX, y, z), new THREE.Vector3(endX, y, z)];
     const geometry = new THREE.BufferGeometry().setFromPoints(points);
-    const hue = 0.5 + normalized * 0.08;
     const material = new THREE.LineBasicMaterial({
-      color: new THREE.Color().setHSL(hue, 0.95, 0.56),
+      color: "#66d8ff",
       transparent: true,
-      opacity: 0.45
+      opacity: 0.72
     });
-    const line = new THREE.Line(geometry, material);
-    group.add(line);
+    group.add(new THREE.Line(geometry, material));
 
-    const particle = new THREE.Mesh(
-      particleGeometry.clone(),
-      new THREE.MeshBasicMaterial({
-        color: new THREE.Color().setHSL(hue, 0.98, 0.65),
-        transparent: true,
-        opacity: 0.85
-      }),
-    );
-    group.add(particle);
-    particles.push({
-      curve,
-      mesh: particle,
-      speed: 0.1 + normalized * 0.04,
-      offset: normalized
-    });
+    if (index % 5 === 0) {
+      const bead = new THREE.Mesh(
+        new THREE.SphereGeometry(size.x * 0.016, 10, 10),
+        new THREE.MeshBasicMaterial({ color: "#9ae7ff", transparent: true, opacity: 0.95 }),
+      );
+      bead.position.set(THREE.MathUtils.lerp(startX, endX, 0.18 + (index % 3) * 0.22), y, z);
+      group.add(bead);
+    }
   }
 
-  const arrowMaterial = new THREE.MeshBasicMaterial({ color: "#9cecff", transparent: true, opacity: 0.9 });
-  const arrowGeometry = new THREE.ConeGeometry(scale * 0.035, scale * 0.11, 12);
+  const arrowMaterial = new THREE.MeshBasicMaterial({ color: "#b7f1ff", transparent: true, opacity: 0.96 });
+  const arrowGeometry = new THREE.ConeGeometry(size.x * 0.055, size.x * 0.14, 3);
   for (let index = 0; index < 3; index += 1) {
     const arrow = new THREE.Mesh(arrowGeometry.clone(), arrowMaterial.clone());
     arrow.rotation.z = -Math.PI / 2;
-    arrow.position.set(-2.95 * scale, extentY * (0.22 - index * 0.18), 0);
+    arrow.position.set(startX - size.x * 0.07, y - size.y * 0.1 - index * size.y * 0.16, center.z - size.z * 0.62);
     group.add(arrow);
   }
 
-  return { group, particles };
+  return group;
+}
+
+function buildPressureSlab(size: THREE.Vector3, center: THREE.Vector3): THREE.Group {
+  const group = new THREE.Group();
+  const texture = makePressureSlabTexture();
+  const geometry = new THREE.PlaneGeometry(size.x * 1.7, size.z * 1.5, 1, 1);
+  const material = new THREE.MeshBasicMaterial({
+    map: texture,
+    transparent: true,
+    opacity: 0.84,
+    side: THREE.DoubleSide,
+    depthWrite: false
+  });
+  const slab = new THREE.Mesh(geometry, material);
+  slab.rotation.x = -Math.PI / 2;
+  slab.position.set(center.x * 0.08, -0.012, center.z * 0.04);
+  group.add(slab);
+
+  const outline = new THREE.LineSegments(
+    new THREE.EdgesGeometry(geometry),
+    new THREE.LineBasicMaterial({
+      color: "#d8ff5d",
+      transparent: true,
+      opacity: 0.24
+    }),
+  );
+  outline.rotation.x = -Math.PI / 2;
+  outline.position.copy(slab.position);
+  group.add(outline);
+
+  return group;
+}
+
+function buildFloorPlane(size: THREE.Vector3, center: THREE.Vector3): THREE.Mesh {
+  const floor = new THREE.Mesh(
+    new THREE.PlaneGeometry(size.x * 6.4, size.z * 4.8, 1, 1),
+    new THREE.MeshPhongMaterial({
+      color: "#05090f",
+      transparent: true,
+      opacity: 0.9,
+      shininess: 18,
+      side: THREE.DoubleSide
+    }),
+  );
+  floor.rotation.x = -Math.PI / 2;
+  floor.position.set(center.x * 0.05, -0.015, center.z * 0.02);
+  return floor;
+}
+
+function makePressureSlabTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement("canvas");
+  canvas.width = 1024;
+  canvas.height = 512;
+  const context = canvas.getContext("2d");
+  if (!context) {
+    const fallback = new THREE.CanvasTexture(canvas);
+    fallback.needsUpdate = true;
+    return fallback;
+  }
+
+  const baseGradient = context.createLinearGradient(0, canvas.height, canvas.width, 0);
+  baseGradient.addColorStop(0, "rgba(134, 248, 255, 0.95)");
+  baseGradient.addColorStop(0.35, "rgba(105, 239, 180, 0.92)");
+  baseGradient.addColorStop(0.78, "rgba(137, 224, 59, 0.88)");
+  baseGradient.addColorStop(1, "rgba(209, 255, 67, 0.82)");
+  context.fillStyle = baseGradient;
+  context.fillRect(0, 0, canvas.width, canvas.height);
+
+  const glow = context.createRadialGradient(canvas.width * 0.22, canvas.height * 0.7, 12, canvas.width * 0.22, canvas.height * 0.7, canvas.width * 0.45);
+  glow.addColorStop(0, "rgba(255,255,255,0.48)");
+  glow.addColorStop(0.2, "rgba(172,255,255,0.42)");
+  glow.addColorStop(0.58, "rgba(112,255,197,0.16)");
+  glow.addColorStop(1, "rgba(112,255,197,0)");
+  context.fillStyle = glow;
+  context.fillRect(0, 0, canvas.width, canvas.height);
+
+  for (let index = 0; index < 5; index += 1) {
+    context.strokeStyle = "rgba(221,255,97,0.22)";
+    context.lineWidth = 1;
+    context.beginPath();
+    context.moveTo(canvas.width * (0.08 + index * 0.18), canvas.height * 0.16);
+    context.lineTo(canvas.width * (0.02 + index * 0.16), canvas.height * 0.94);
+    context.stroke();
+  }
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.needsUpdate = true;
+  return texture;
 }
