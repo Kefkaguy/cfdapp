@@ -13,6 +13,11 @@ interface PressureViewerProps {
 
 export function PressureViewer({ payload, summary, yawDegrees, onYawChange }: PressureViewerProps) {
   const mountRef = useRef<HTMLDivElement | null>(null);
+  const yawRef = useRef(yawDegrees);
+
+  useEffect(() => {
+    yawRef.current = yawDegrees;
+  }, [yawDegrees]);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -28,6 +33,8 @@ export function PressureViewer({ payload, summary, yawDegrees, onYawChange }: Pr
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(mount.clientWidth, mount.clientHeight);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.08;
     mount.appendChild(renderer.domElement);
 
     const camera = new THREE.PerspectiveCamera(42, mount.clientWidth / mount.clientHeight, 0.01, 100);
@@ -58,32 +65,30 @@ export function PressureViewer({ payload, summary, yawDegrees, onYawChange }: Pr
     geometry.setAttribute("color", new THREE.Float32BufferAttribute(buildVertexColors(payload), 3));
     geometry.computeVertexNormals();
 
-    const material = new THREE.MeshPhysicalMaterial({
+    const material = new THREE.MeshStandardMaterial({
       vertexColors: true,
-      metalness: 0.05,
-      roughness: 0.22,
-      clearcoat: 0.45,
-      clearcoatRoughness: 0.18,
-      transmission: 0.08,
-      transparent: true,
-      opacity: 0.96,
+      metalness: 0.02,
+      roughness: 0.36,
       side: THREE.DoubleSide
     });
 
     const mesh = new THREE.Mesh(geometry, material);
+    mesh.renderOrder = 3;
     const wireframe = new THREE.LineSegments(
       new THREE.EdgesGeometry(geometry, 27),
       new THREE.LineBasicMaterial({
         color: "#c6fff0",
         transparent: true,
-        opacity: 0.18
+        opacity: 0.1,
+        depthTest: true
       }),
     );
+    wireframe.renderOrder = 4;
     const carGroup = new THREE.Group();
     carGroup.add(mesh);
     carGroup.add(wireframe);
     scene.add(carGroup);
-    carGroup.rotation.y = THREE.MathUtils.degToRad(yawDegrees);
+    carGroup.rotation.y = THREE.MathUtils.degToRad(yawRef.current);
 
     const box = new THREE.Box3().setFromObject(mesh);
     const size = box.getSize(new THREE.Vector3());
@@ -103,6 +108,7 @@ export function PressureViewer({ payload, summary, yawDegrees, onYawChange }: Pr
     const freestreamGroup = buildFreestreamGroup(size, center);
     scene.add(freestreamGroup);
 
+    const clock = new THREE.Clock();
     let animationFrame = 0;
     const onResize = () => {
       camera.aspect = mount.clientWidth / mount.clientHeight;
@@ -112,7 +118,10 @@ export function PressureViewer({ payload, summary, yawDegrees, onYawChange }: Pr
     window.addEventListener("resize", onResize);
 
     const render = () => {
-      carGroup.rotation.y = THREE.MathUtils.degToRad(yawDegrees);
+      const elapsed = clock.getElapsedTime();
+      carGroup.rotation.y = THREE.MathUtils.degToRad(yawRef.current);
+      animateFreestream(freestreamGroup, elapsed);
+      animatePressureSlab(slab, elapsed);
       controls.update();
       renderer.render(scene, camera);
       animationFrame = window.requestAnimationFrame(render);
@@ -133,6 +142,12 @@ export function PressureViewer({ payload, summary, yawDegrees, onYawChange }: Pr
       });
       slab.traverse((child) => {
         if (child instanceof THREE.Mesh) {
+          if (child.material instanceof THREE.MeshBasicMaterial && child.material.map) {
+            child.material.map.dispose();
+          }
+          child.geometry.dispose();
+          disposeMaterial(child.material);
+        } else if (child instanceof THREE.LineSegments) {
           child.geometry.dispose();
           disposeMaterial(child.material);
         }
@@ -144,7 +159,7 @@ export function PressureViewer({ payload, summary, yawDegrees, onYawChange }: Pr
       renderer.dispose();
       mount.removeChild(renderer.domElement);
     };
-  }, [payload, yawDegrees]);
+  }, [payload]);
 
   return (
     <section className="panel viewer-panel">
@@ -198,13 +213,78 @@ export function PressureViewer({ payload, summary, yawDegrees, onYawChange }: Pr
 }
 
 function buildVertexColors(payload: PressureSurfacePayload): number[] {
-  const [minPressure, maxPressure] = payload.pressureRange;
-  const range = Math.max(maxPressure - minPressure, 1e-6);
-  return payload.pressure.flatMap((value) => {
-    const t = (value - minPressure) / range;
-    const color = new THREE.Color().setHSL(0.33 * (1 - t), 0.95, 0.48);
+  const pressure = mapPressureToVertices(payload);
+  const [visualMin, visualMax] = getVisualPressureRange(pressure, payload.pressureRange);
+  const range = Math.max(visualMax - visualMin, 1e-6);
+  return pressure.flatMap((value) => {
+    const normalized = THREE.MathUtils.clamp((value - visualMin) / range, 0, 1);
+    const t = smoothContrast(normalized);
+    const color = samplePressureColor(t);
     return [color.r, color.g, color.b];
   });
+}
+
+function getVisualPressureRange(pressure: number[], fallbackRange: [number, number]): [number, number] {
+  const finite = pressure.filter(Number.isFinite).slice().sort((a, b) => a - b);
+  if (finite.length < 8) {
+    return fallbackRange;
+  }
+
+  const low = finite[Math.floor((finite.length - 1) * 0.03)];
+  const high = finite[Math.ceil((finite.length - 1) * 0.97)];
+  if (high - low > 1e-6) {
+    return [low, high];
+  }
+  return fallbackRange;
+}
+
+function smoothContrast(t: number): number {
+  const eased = t * t * (3 - 2 * t);
+  return THREE.MathUtils.clamp((eased - 0.08) / 0.84, 0, 1);
+}
+
+function mapPressureToVertices(payload: PressureSurfacePayload): number[] {
+  const vertexCount = payload.positions.length / 3;
+  if (payload.pressure.length === vertexCount) {
+    return payload.pressure;
+  }
+
+  const faceCount = payload.indices.length / 3;
+  if (payload.pressure.length === faceCount) {
+    const totals = Array.from({ length: vertexCount }, () => 0);
+    const counts = Array.from({ length: vertexCount }, () => 0);
+    for (let faceIndex = 0; faceIndex < faceCount; faceIndex += 1) {
+      const pressure = payload.pressure[faceIndex];
+      for (let corner = 0; corner < 3; corner += 1) {
+        const vertexIndex = payload.indices[faceIndex * 3 + corner];
+        totals[vertexIndex] += pressure;
+        counts[vertexIndex] += 1;
+      }
+    }
+    return totals.map((total, index) => (counts[index] === 0 ? payload.pressure[0] : total / counts[index]));
+  }
+
+  const fallback = payload.pressure.length > 0 ? payload.pressure[0] : payload.pressureRange[0];
+  return Array.from({ length: vertexCount }, () => fallback);
+}
+
+function samplePressureColor(t: number): THREE.Color {
+  const stops: Array<[number, string]> = [
+    [0, "#2457ff"],
+    [0.25, "#14d9ff"],
+    [0.48, "#16d05e"],
+    [0.72, "#f3ef3d"],
+    [1, "#ff3d24"]
+  ];
+  for (let index = 1; index < stops.length; index += 1) {
+    const [stopT, stopColor] = stops[index];
+    if (t <= stopT) {
+      const [previousT, previousColor] = stops[index - 1];
+      const localT = (t - previousT) / Math.max(stopT - previousT, 1e-6);
+      return new THREE.Color(previousColor).lerp(new THREE.Color(stopColor), localT);
+    }
+  }
+  return new THREE.Color(stops[stops.length - 1][1]);
 }
 
 function disposeMaterial(material: THREE.Material | THREE.Material[]): void {
@@ -270,60 +350,147 @@ function orientAndNormalizePositions(positions: number[]): number[] {
 
 function buildFreestreamGroup(size: THREE.Vector3, center: THREE.Vector3): THREE.Group {
   const group = new THREE.Group();
-  const lineCount = 22;
+  const lineCount = 18;
+  const pointsPerLine = 72;
   const lineLength = size.x * 5.9;
-  const spacing = Math.max(size.z * 0.16, 0.1);
+  const spacing = Math.max(size.z * 0.2, 0.12);
   const startX = center.x - lineLength * 0.56;
   const endX = center.x + lineLength * 0.44;
-  const y = size.y * 0.22;
+  const y = size.y * 0.74;
+  const waveAmplitude = Math.max(size.z * 0.035, 0.012);
+  const streamZValues = buildStreamZValues(center.z, size.z, spacing, lineCount);
 
-  for (let index = 0; index < lineCount; index += 1) {
-    const z = center.z + (index - (lineCount - 1) / 2) * spacing;
-    const points = [new THREE.Vector3(startX, y, z), new THREE.Vector3(endX, y, z)];
+  for (let index = 0; index < streamZValues.length; index += 1) {
+    const z = streamZValues[index];
+    const points: THREE.Vector3[] = [];
+    for (let pointIndex = 0; pointIndex < pointsPerLine; pointIndex += 1) {
+      const t = pointIndex / (pointsPerLine - 1);
+      points.push(new THREE.Vector3(THREE.MathUtils.lerp(startX, endX, t), y, z));
+    }
     const geometry = new THREE.BufferGeometry().setFromPoints(points);
     const material = new THREE.LineBasicMaterial({
       color: "#66d8ff",
       transparent: true,
-      opacity: 0.72
+      opacity: 0.42,
+      depthTest: true
     });
-    group.add(new THREE.Line(geometry, material));
+    const line = new THREE.Line(geometry, material);
+    line.renderOrder = 1;
+    line.userData.wave = {
+      baseY: y,
+      baseZ: z,
+      phase: index * 0.42,
+      amplitude: waveAmplitude,
+      startX,
+      endX,
+      pointsPerLine
+    };
+    group.add(line);
 
-    if (index % 5 === 0) {
+    if (index % 4 === 0) {
       const bead = new THREE.Mesh(
         new THREE.SphereGeometry(size.x * 0.016, 10, 10),
-        new THREE.MeshBasicMaterial({ color: "#9ae7ff", transparent: true, opacity: 0.95 }),
+        new THREE.MeshBasicMaterial({ color: "#9ae7ff", transparent: true, opacity: 0.82, depthTest: true }),
       );
+      bead.renderOrder = 2;
+      bead.userData.stream = {
+        baseY: y,
+        baseZ: z,
+        phase: index * 0.37,
+        amplitude: waveAmplitude,
+        startX,
+        endX
+      };
       bead.position.set(THREE.MathUtils.lerp(startX, endX, 0.18 + (index % 3) * 0.22), y, z);
       group.add(bead);
     }
   }
 
-  const arrowMaterial = new THREE.MeshBasicMaterial({ color: "#b7f1ff", transparent: true, opacity: 0.96 });
+  const arrowMaterial = new THREE.MeshBasicMaterial({ color: "#b7f1ff", transparent: true, opacity: 0.82, depthTest: true });
   const arrowGeometry = new THREE.ConeGeometry(size.x * 0.055, size.x * 0.14, 3);
   for (let index = 0; index < 3; index += 1) {
     const arrow = new THREE.Mesh(arrowGeometry.clone(), arrowMaterial.clone());
+    arrow.renderOrder = 2;
     arrow.rotation.z = -Math.PI / 2;
-    arrow.position.set(startX - size.x * 0.07, y - size.y * 0.1 - index * size.y * 0.16, center.z - size.z * 0.62);
+    arrow.position.set(startX - size.x * 0.07, y - index * size.y * 0.14, center.z - size.z * 0.82);
     group.add(arrow);
   }
+  arrowGeometry.dispose();
+  arrowMaterial.dispose();
 
   return group;
+}
+
+function buildStreamZValues(centerZ: number, sizeZ: number, spacing: number, lineCount: number): number[] {
+  const values: number[] = [];
+  const halfCount = Math.ceil(lineCount / 2);
+  const centralGap = Math.max(sizeZ * 0.62, spacing * 1.4);
+  for (let index = 0; index < halfCount; index += 1) {
+    const offset = centralGap + index * spacing;
+    values.push(centerZ - offset, centerZ + offset);
+  }
+  return values.slice(0, lineCount).sort((a, b) => a - b);
+}
+
+function animateFreestream(group: THREE.Group, elapsed: number): void {
+  group.children.forEach((child) => {
+    if (child instanceof THREE.Line && child.userData.wave) {
+      const wave = child.userData.wave as {
+        baseY: number;
+        baseZ: number;
+        phase: number;
+        amplitude: number;
+        startX: number;
+        endX: number;
+        pointsPerLine: number;
+      };
+      const positions = child.geometry.getAttribute("position") as THREE.BufferAttribute;
+      for (let index = 0; index < wave.pointsPerLine; index += 1) {
+        const t = index / (wave.pointsPerLine - 1);
+        const x = THREE.MathUtils.lerp(wave.startX, wave.endX, t);
+        const ripple = Math.sin(t * Math.PI * 5.5 - elapsed * 3.8 + wave.phase);
+        positions.setXYZ(index, x, wave.baseY + ripple * wave.amplitude * 0.42, wave.baseZ + ripple * wave.amplitude);
+      }
+      positions.needsUpdate = true;
+      return;
+    }
+
+    if (child instanceof THREE.Mesh && child.userData.stream) {
+      const stream = child.userData.stream as {
+        baseY: number;
+        baseZ: number;
+        phase: number;
+        amplitude: number;
+        startX: number;
+        endX: number;
+      };
+      const progress = (elapsed * 0.22 + stream.phase) % 1;
+      const ripple = Math.sin(progress * Math.PI * 5.5 - elapsed * 3.8 + stream.phase);
+      child.position.set(
+        THREE.MathUtils.lerp(stream.startX, stream.endX, progress),
+        stream.baseY + ripple * stream.amplitude * 0.42,
+        stream.baseZ + ripple * stream.amplitude
+      );
+    }
+  });
 }
 
 function buildPressureSlab(size: THREE.Vector3, center: THREE.Vector3): THREE.Group {
   const group = new THREE.Group();
   const texture = makePressureSlabTexture();
-  const geometry = new THREE.PlaneGeometry(size.x * 1.7, size.z * 1.5, 1, 1);
+  const geometry = new THREE.PlaneGeometry(size.x * 1.62, size.z * 1.35, 1, 1);
   const material = new THREE.MeshBasicMaterial({
     map: texture,
     transparent: true,
-    opacity: 0.84,
+    opacity: 0.38,
     side: THREE.DoubleSide,
-    depthWrite: false
+    depthWrite: false,
+    depthTest: true
   });
   const slab = new THREE.Mesh(geometry, material);
+  slab.renderOrder = 0;
   slab.rotation.x = -Math.PI / 2;
-  slab.position.set(center.x * 0.08, -0.012, center.z * 0.04);
+  slab.position.set(center.x * 0.08, -0.055, center.z * 0.04);
   group.add(slab);
 
   const outline = new THREE.LineSegments(
@@ -331,14 +498,29 @@ function buildPressureSlab(size: THREE.Vector3, center: THREE.Vector3): THREE.Gr
     new THREE.LineBasicMaterial({
       color: "#d8ff5d",
       transparent: true,
-      opacity: 0.24
+      opacity: 0.16,
+      depthTest: true
     }),
   );
+  outline.renderOrder = 1;
   outline.rotation.x = -Math.PI / 2;
   outline.position.copy(slab.position);
   group.add(outline);
 
   return group;
+}
+
+function animatePressureSlab(group: THREE.Group, elapsed: number): void {
+  group.children.forEach((child, index) => {
+    if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshBasicMaterial) {
+      child.material.opacity = 0.32 + Math.sin(elapsed * 1.8) * 0.04;
+      child.position.y = -0.055 + Math.sin(elapsed * 1.45) * 0.0015;
+      return;
+    }
+    if (child instanceof THREE.LineSegments && child.material instanceof THREE.LineBasicMaterial) {
+      child.material.opacity = 0.18 + Math.sin(elapsed * 1.8 + index) * 0.06;
+    }
+  });
 }
 
 function buildFloorPlane(size: THREE.Vector3, center: THREE.Vector3): THREE.Mesh {
@@ -352,8 +534,9 @@ function buildFloorPlane(size: THREE.Vector3, center: THREE.Vector3): THREE.Mesh
       side: THREE.DoubleSide
     }),
   );
+  floor.renderOrder = -1;
   floor.rotation.x = -Math.PI / 2;
-  floor.position.set(center.x * 0.05, -0.015, center.z * 0.02);
+  floor.position.set(center.x * 0.05, -0.068, center.z * 0.02);
   return floor;
 }
 
@@ -369,10 +552,11 @@ function makePressureSlabTexture(): THREE.CanvasTexture {
   }
 
   const baseGradient = context.createLinearGradient(0, canvas.height, canvas.width, 0);
-  baseGradient.addColorStop(0, "rgba(134, 248, 255, 0.95)");
-  baseGradient.addColorStop(0.35, "rgba(105, 239, 180, 0.92)");
-  baseGradient.addColorStop(0.78, "rgba(137, 224, 59, 0.88)");
-  baseGradient.addColorStop(1, "rgba(209, 255, 67, 0.82)");
+  baseGradient.addColorStop(0, "rgba(36, 87, 255, 0.88)");
+  baseGradient.addColorStop(0.25, "rgba(20, 217, 255, 0.9)");
+  baseGradient.addColorStop(0.5, "rgba(22, 208, 94, 0.92)");
+  baseGradient.addColorStop(0.76, "rgba(243, 239, 61, 0.9)");
+  baseGradient.addColorStop(1, "rgba(255, 61, 36, 0.82)");
   context.fillStyle = baseGradient;
   context.fillRect(0, 0, canvas.width, canvas.height);
 
